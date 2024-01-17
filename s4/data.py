@@ -10,6 +10,106 @@ from torch.utils.data import TensorDataset, random_split
 from tqdm import tqdm
 
 
+### TESS flare classification
+# **Task**: Classify TESS time series data (200) as flares/not flares (2 categories)
+
+def create_tess_flare_classification_dataset(bsz=128):
+    print("[*] Generating TESS flare classification data set...")
+
+    SEQ_LENGTH, N_CLASSES, IN_DIM = 200, 2, 1
+
+    import astropy.io.fits as fits
+
+    class FITSDataset(TensorDataset):
+        def __init__(self, file_path, train=True, transform=None):
+            with fits.open(file_path) as hdulist:
+                if train:
+                    self.data = hdulist[1].data["train_data"].reshape(-1,SEQ_LENGTH,IN_DIM).astype(np.float32)
+                    self.labels = hdulist[1].data["train_labels"].astype(int)
+                else:
+                    self.data = hdulist[2].data["test_data"].reshape(-1,SEQ_LENGTH,IN_DIM).astype(np.float32)
+                    self.labels = hdulist[2].data["test_labels"].astype(int)
+
+            self.transform = transform
+
+        def __len__(self):
+            return len(self.data)
+
+        def __getitem__(self, idx):
+            x = self.data[idx]
+            y = self.labels[idx]
+
+            if self.transform:
+                x = self.transform(x)
+
+            return x, y
+
+    file_path = "data/tess-flares/hellouniverse_stella_500.fits"
+    
+    
+    train = FITSDataset(file_path, train=True, transform=torch.from_numpy)
+    test = FITSDataset(file_path, train=False, transform=torch.from_numpy)
+
+    # Return data loaders, with the provided batch size
+    trainloader = torch.utils.data.DataLoader(
+        train, batch_size=bsz, shuffle=True
+    )
+    testloader = torch.utils.data.DataLoader(
+        test, batch_size=bsz, shuffle=False
+    )
+
+    return trainloader, testloader, N_CLASSES, SEQ_LENGTH, IN_DIM
+
+# ### DESI spectra sequence modeling
+# **Task**: Predict next flux density given spectrum, in an autoregressive fashion (7781 floats).
+#
+def create_desi_dataset(bsz=128):
+    print("[*] Generating DESI spectra data set...")
+
+    # Constants
+    SEQ_LENGTH, N_CLASSES, IN_DIM = 7781, 1, 1
+
+    class SpectraDataset(TensorDataset):
+        def __init__(self, transform=None):
+            self.data = (
+                np.load("data/desi/spectra.npy")
+                .clip(-1e3, 1e5)
+                .reshape(-1, SEQ_LENGTH, IN_DIM)
+                .astype(np.float32)
+            )
+            self.transform = transform
+
+        def __len__(self):
+            return len(self.data)
+
+        def __getitem__(self, idx):
+            x = self.data[idx]
+
+            if self.transform:
+                x = self.transform(x)
+
+            return x, x
+
+    # Generate train/test splits... test set should be just 8192 samples
+    print("\tGenerating Train/Test Splits...")
+    n_test = 8192
+
+    dataset = SpectraDataset(transform=torch.from_numpy)
+    train, test = random_split(
+        dataset, [len(dataset) - n_test, n_test], torch.Generator().manual_seed(3)
+    )
+
+    # Return data loaders with the provided batch size
+    trainloader = torch.utils.data.DataLoader(
+        train, batch_size=bsz, shuffle=True
+    )
+    testloader = torch.utils.data.DataLoader(
+        test, batch_size=bsz, shuffle=False
+    )
+
+    return trainloader, testloader, N_CLASSES, SEQ_LENGTH, IN_DIM
+
+
 # ### $sin(x)$
 # **Task**: Overfit to a 8-bit quantized sin(x) from 0 - 2*Pi -- sampled 360 times.
 #
@@ -660,6 +760,8 @@ def create_listops_classification_dataset(bsz):
 
 
 Datasets = {
+    "tess-classification": create_tess_flare_classification_dataset,
+    "desi": create_desi_dataset,
     "mnist": create_mnist_dataset,
     "quickdraw": create_quickdraw_dataset,
     "fsdd": create_fsdd_dataset,

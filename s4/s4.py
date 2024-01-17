@@ -559,6 +559,7 @@ class StackedModel(nn.Module):
     classification: bool = False
     training: bool = True
     decode: bool = False  # Probably should be moved into layer_args
+    discretized_outputs: bool = True # return log_softmax of outputs?
 
     def setup(self):
         if self.embedding:
@@ -591,7 +592,7 @@ class StackedModel(nn.Module):
         if self.classification:
             x = np.mean(x, axis=0)
         x = self.decoder(x)
-        return nn.log_softmax(x, axis=-1)
+        return nn.log_softmax(x, axis=-1) if self.discretized_outputs else np.mean(x, axis=-1, keepdims=-1)
 
 
 # In Flax we add the batch dimension as a lifted transformation.

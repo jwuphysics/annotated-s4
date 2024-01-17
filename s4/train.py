@@ -15,6 +15,7 @@ from .dss import DSSLayer
 from .s4 import BatchStackedModel, S4Layer, SSMLayer, sample_image_prefix
 from .s4d import S4DLayer
 
+from pathlib import Path
 
 try:
     # Slightly nonstandard import name to make config easier - see example_train()
@@ -77,7 +78,7 @@ def create_train_state(
         np.array(next(iter(trainloader))[0].numpy()),
     )
     # Note: Added immediate `unfreeze()` to play well w/ Optax. See below!
-    params = params["params"].unfreeze()
+    params = params["params"] #.unfreeze()
 
     # Handle learning rates:
     # - LR scheduler
@@ -110,7 +111,7 @@ def create_train_state(
         lr_layer = {}
 
     optimizers = {
-        k: optax.adam(learning_rate=schedule_fn(v * lr))
+        k: optax.adamw(learning_rate=schedule_fn(v * lr))
         for k, v in lr_layer.items()
     }
     # Add default optimizer
@@ -127,7 +128,7 @@ def create_train_state(
     # tx = optax.adamw(learning_rate=lr, weight_decay=0.01)
 
     # Check that all special parameter names are actually parameters
-    extra_keys = set(lr_layer.keys()) - set(jax.tree_leaves(name_map(params)))
+    extra_keys = set(lr_layer.keys()) - set(jax.tree_util.tree_leaves(name_map(params)))
     assert (
         len(extra_keys) == 0
     ), f"Special params {extra_keys} do not correspond to actual params"
@@ -139,7 +140,7 @@ def create_train_state(
         if lr_layer.get(k, lr) > 0.0
         else 0
     )(params)
-    print(f"[*] Trainable Parameters: {sum(jax.tree_leaves(param_sizes))}")
+    print(f"[*] Trainable Parameters: {sum(jax.tree_util.tree_leaves(param_sizes))}")
     print(f"[*] Total training steps: {total_steps}")
 
     return train_state.TrainState.create(
@@ -152,7 +153,7 @@ def create_train_state(
 # We define the step functions on a model-specific basis below.
 
 
-def train_epoch(state, rng, model, trainloader, classification=False):
+def train_epoch(state, rng, model, trainloader, classification=False, discretized_outputs=True):
     # Store Metrics
     model = model(training=True)
     batch_losses, batch_accuracies = [], []
@@ -167,6 +168,7 @@ def train_epoch(state, rng, model, trainloader, classification=False):
             labels,
             model,
             classification=classification,
+            discretized_outputs=discretized_outputs,
         )
         batch_losses.append(loss)
         batch_accuracies.append(acc)
@@ -179,7 +181,7 @@ def train_epoch(state, rng, model, trainloader, classification=False):
     )
 
 
-def validate(params, model, testloader, classification=False):
+def validate(params, model, testloader, classification=False, discretized_outputs=True):
     # Compute average loss & accuracy
     model = model(training=False)
     losses, accuracies = [], []
@@ -187,7 +189,7 @@ def validate(params, model, testloader, classification=False):
         inputs = np.array(inputs.numpy())
         labels = np.array(labels.numpy())  # Not the most efficient...
         loss, acc = eval_step(
-            inputs, labels, params, model, classification=classification
+            inputs, labels, params, model, classification=classification, discretized_outputs=discretized_outputs,
         )
         losses.append(loss)
         accuracies.append(acc)
@@ -220,38 +222,66 @@ class FeedForwardModel(nn.Module):
 # calls will become increasingly important as we optimize S4.
 
 
-@partial(jax.jit, static_argnums=(4, 5))
+@partial(jax.jit, static_argnums=(4, 5, 6))
 def train_step(
-    state, rng, batch_inputs, batch_labels, model, classification=False
+    state, rng, batch_inputs, batch_labels, model, classification=False, discretized_outputs=True,
 ):
-    def loss_fn(params):
-        logits, mod_vars = model.apply(
-            {"params": params},
-            batch_inputs,
-            rngs={"dropout": rng},
-            mutable=["intermediates"],
-        )
+    if discretized_outputs:
+        def loss_fn(params):
+            logits, mod_vars = model.apply(
+                {"params": params},
+                batch_inputs,
+                rngs={"dropout": rng},
+                mutable=["intermediates"],
+            )
+            loss = np.mean(cross_entropy_loss(logits, batch_labels))
+            acc = np.mean(compute_accuracy(logits, batch_labels))
+            return loss, (logits, acc)
+
+        if not classification:
+            batch_labels = batch_inputs[:, :, 0]
+
+        grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+        (loss, (logits, acc)), grads = grad_fn(state.params)
+        state = state.apply_gradients(grads=grads)
+        return state, loss, acc
+    else:
+        # then we must be predicting next value in sequence
+        classification = False
+
+        def loss_fn(params):
+            vals, mod_vars = model.apply(
+                {"params": params},
+                batch_inputs,
+                rngs={"dropout": rng},
+                mutable=["intermediates"],
+            )
+            loss = np.mean((vals - batch_labels)**2)
+            rmse = np.sqrt(loss)
+            return loss, (vals, rmse)
+
+        grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+        (loss, (vals, rmse)), grads = grad_fn(state.params)
+        state = state.apply_gradients(grads=grads)
+        return state, loss, rmse
+
+
+@partial(jax.jit, static_argnums=(3, 4, 5))
+def eval_step(batch_inputs, batch_labels, params, model, classification=False, discretized_outputs=True):
+    if not classification or not discretized_outputs:
+        batch_labels = batch_inputs[:, :, 0]
+
+    if discretized_outputs:
+        logits = model.apply({"params": params}, batch_inputs)
         loss = np.mean(cross_entropy_loss(logits, batch_labels))
         acc = np.mean(compute_accuracy(logits, batch_labels))
-        return loss, (logits, acc)
-
-    if not classification:
-        batch_labels = batch_inputs[:, :, 0]
-
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, (logits, acc)), grads = grad_fn(state.params)
-    state = state.apply_gradients(grads=grads)
-    return state, loss, acc
-
-
-@partial(jax.jit, static_argnums=(3, 4))
-def eval_step(batch_inputs, batch_labels, params, model, classification=False):
-    if not classification:
-        batch_labels = batch_inputs[:, :, 0]
-    logits = model.apply({"params": params}, batch_inputs)
-    loss = np.mean(cross_entropy_loss(logits, batch_labels))
-    acc = np.mean(compute_accuracy(logits, batch_labels))
-    return loss, acc
+        return loss, acc
+    else:
+        vals = model.apply({"params": params}, batch_inputs)
+        vals = vals.squeeze()
+        loss = np.mean((vals - batch_labels)**2)
+        rmse = np.sqrt(loss)
+        return loss, rmse
 
 
 # ### LSTM Recurrent Model
@@ -314,6 +344,7 @@ def example_train(
 
     # Check if classification dataset
     classification = "classification" in dataset
+    discretized_outputs = "desi" not in dataset      # continuous only works for DESI spectra prediction right now
 
     # Create dataset
     create_dataset_fn = Datasets[dataset]
@@ -335,6 +366,7 @@ def example_train(
         layer_cls=layer_cls,
         d_output=n_classes,
         classification=classification,
+        discretized_outputs=discretized_outputs,
         **model,
     )
 
@@ -359,11 +391,16 @@ def example_train(
             model_cls,
             trainloader,
             classification=classification,
+            discretized_outputs=discretized_outputs,
         )
 
         print(f"[*] Running Epoch {epoch + 1} Validation...")
         test_loss, test_acc = validate(
-            state.params, model_cls, testloader, classification=classification
+            state.params, 
+            model_cls, 
+            testloader, 
+            classification=classification, 
+            discretized_outputs=discretized_outputs,
         )
 
         print(f"\n=>> Epoch {epoch + 1} Metrics ===")
@@ -377,6 +414,12 @@ def example_train(
         if train.checkpoint:
             suf = f"-{train.suffix}" if train.suffix is not None else ""
             run_id = f"checkpoints/{dataset}/{layer}-d_model={model.d_model}-lr={train.lr}-bsz={train.bsz}{suf}"
+            run_id = Path(run_id).resolve()
+
+            # janky removal of previous checkpoints...
+            if os.path.exists(f"{run_id}/checkpoint_{epoch}"):
+                shutil.rmtree(f"{run_id}/checkpoint_{epoch}")
+
             ckpt_path = checkpoints.save_checkpoint(
                 run_id,
                 state,
@@ -422,9 +465,9 @@ def example_train(
         ):
             # Create new "best-{step}.ckpt and remove old one
             if train.checkpoint:
-                shutil.copy(ckpt_path, f"{run_id}/best_{epoch}")
+                shutil.copytree(ckpt_path, f"{run_id}/best_{epoch}", dirs_exist_ok=True)
                 if os.path.exists(f"{run_id}/best_{best_epoch}"):
-                    os.remove(f"{run_id}/best_{best_epoch}")
+                    shutil.rmtree(f"{run_id}/best_{best_epoch}")
 
             best_loss, best_acc, best_epoch = test_loss, test_acc, epoch
 

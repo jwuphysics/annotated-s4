@@ -1,4 +1,4 @@
-dataset: mnist-classification
+dataset: desi-
 layer: s4
 seed: 0
 
@@ -24,7 +24,7 @@ train:
 # Pass in 'wandb.mode=online' to turn on wandb logging
 wandb:
   mode: disabled
-  project: s4
+  project: s4-desi
   entity: null
 
 # hydra creates a working directory in outputs/ that manages jobs,
