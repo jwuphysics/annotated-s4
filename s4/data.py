@@ -6,6 +6,8 @@ import torchtext
 import torchvision
 import torchvision.transforms as transforms
 from datasets import DatasetDict, load_dataset
+from functools import partial
+from scipy.ndimage import gaussian_filter1d
 from torch.utils.data import TensorDataset, random_split
 from tqdm import tqdm
 
@@ -94,7 +96,14 @@ def create_desi_dataset(bsz=128):
     print("\tGenerating Train/Test Splits...")
     n_test = 8192
 
-    dataset = SpectraDataset(transform=torch.from_numpy)
+    tf = transforms.Compose(
+        [
+            partial(gaussian_filter1d, sigma=5, mode="nearest"),
+            torch.from_numpy,
+        ]
+    )
+
+    dataset = SpectraDataset(transform=tf)
     train, test = random_split(
         dataset, [len(dataset) - n_test, n_test], torch.Generator().manual_seed(3)
     )
