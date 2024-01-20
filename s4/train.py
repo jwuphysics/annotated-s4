@@ -160,6 +160,7 @@ def train_epoch(state, rng, model, trainloader, classification=False, discretize
     for batch_idx, (inputs, labels) in enumerate(tqdm(trainloader)):
         inputs = np.array(inputs.numpy())
         labels = np.array(labels.numpy())  # Not the most efficient...
+
         rng, drop_rng = jax.random.split(rng)
         state, loss, acc = train_step(
             state,
@@ -256,8 +257,13 @@ def train_step(
                 rngs={"dropout": rng},
                 mutable=["intermediates"],
             )
-            loss = np.mean((vals - batch_labels)**2)
-            rmse = np.sqrt(loss)
+            # Huber loss with delta = 3
+            errors = (vals - batch_labels)
+            abs_errors = np.abs(errors)
+            l2_errors = np.minimum(abs_errors, 3)
+            l1_errors = abs_errors - l2_errors
+            loss = 0.5 * np.mean(l2_errors)**2 + 3*np.mean(l1_errors)
+            rmse = np.sqrt(np.mean(l2_errors**2))
             return loss, (vals, rmse)
 
         grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
@@ -279,8 +285,12 @@ def eval_step(batch_inputs, batch_labels, params, model, classification=False, d
     else:
         vals = model.apply({"params": params}, batch_inputs)
         vals = vals.squeeze()
-        loss = np.mean((vals - batch_labels)**2)
-        rmse = np.sqrt(loss)
+        errors = (vals - batch_labels)
+        abs_errors = np.abs(errors)
+        l2_errors = np.minimum(abs_errors, 3)
+        l1_errors = abs_errors - l2_errors
+        loss = 0.5 * np.mean(l2_errors)**2 + 3*np.mean(l1_errors)
+        rmse = np.sqrt(np.mean(l2_errors**2))
         return loss, rmse
 
 
@@ -344,7 +354,10 @@ def example_train(
 
     # Check if classification dataset
     classification = "classification" in dataset
-    discretized_outputs = "desi" not in dataset      # continuous only works for DESI spectra prediction right now
+    if ("desi" in dataset) or ("tess" in dataset):
+        discretized_outputs = False 
+    else:
+        discretized_outputs = True
 
     # Create dataset
     create_dataset_fn = Datasets[dataset]

@@ -62,6 +62,77 @@ def create_tess_flare_classification_dataset(bsz=128):
 
     return trainloader, testloader, N_CLASSES, SEQ_LENGTH, IN_DIM
 
+### TESS lightcurve prediction
+# **Task**: Predict next flux density for a given source in an autoregressive fashion
+# data are preprocessed to be 2000 tokens (*5 s) long, shorter durations are truncated
+# while longer ones are discarded
+
+def create_tess_lightcurve_dataset(bsz=128):
+    print("[*] Generating TESS light curve data set...")
+
+    # Constants
+    SEQ_LENGTH, N_CLASSES, IN_DIM = 2000, 1, 1
+
+    class LightCurveDataset(TensorDataset):
+        def __init__(self, transform=None):
+            self.data = (
+                np.load("data/tess-lightcurves/tess-preprocessed-data-lightcurves.npy")
+                .reshape(-1, SEQ_LENGTH, IN_DIM)
+                .astype(np.float32)
+            )
+
+            self.names = np.load("data/tess-lightcurves/tess-preprocessed-data-ids.npy")
+            self.times = np.load("data/tess-lightcurves/tess-preprocessed-data-times.npy")
+
+            self.transform = transform
+
+        def __len__(self):
+            return len(self.data)
+
+        def __getitem__(self, idx):
+            x = self.data[idx]
+
+            if self.transform:
+                x = self.transform(x)
+
+            return x, x
+
+        def get_all_data(self, idx):
+            x = self.data[idx]
+            if self.trasform:
+                x = self.transform(x)
+            name = self.names[idx]
+            time = self.times[idx]
+            return name, time, x
+
+    print("\tGenerating Train/Test Splits...")
+    
+    tf = transforms.Compose(
+        [
+            torch.from_numpy,
+            transforms.Lambda(lambda t: t / t.mean()),
+        ]
+    )
+
+    dataset = LightCurveDataset(transform=tf)
+
+    n_test = int(0.1 * len(dataset))
+    train, test = random_split(
+        dataset, [len(dataset) - n_test, n_test], torch.Generator().manual_seed(3)
+    )
+
+    # Return data loaders with the provided batch size
+    trainloader = torch.utils.data.DataLoader(
+        train, batch_size=bsz, shuffle=True
+    )
+    testloader = torch.utils.data.DataLoader(
+        test, batch_size=bsz, shuffle=False
+    )
+
+    return trainloader, testloader, N_CLASSES, SEQ_LENGTH, IN_DIM
+
+
+
 # ### DESI spectra sequence modeling
 # **Task**: Predict next flux density given spectrum, in an autoregressive fashion (7781 floats).
 #
@@ -75,7 +146,6 @@ def create_desi_dataset(bsz=128):
         def __init__(self, transform=None):
             self.data = (
                 np.load("data/desi/spectra.npy")
-                .clip(-1e3, 1e5)
                 .reshape(-1, SEQ_LENGTH, IN_DIM)
                 .astype(np.float32)
             )
@@ -94,7 +164,7 @@ def create_desi_dataset(bsz=128):
 
     # Generate train/test splits... test set should be just 8192 samples
     print("\tGenerating Train/Test Splits...")
-    n_test = 8192
+    n_test = 16384
 
     tf = transforms.Compose(
         [
@@ -769,6 +839,7 @@ def create_listops_classification_dataset(bsz):
 
 
 Datasets = {
+    "tess": create_tess_lightcurve_dataset,
     "tess-classification": create_tess_flare_classification_dataset,
     "desi": create_desi_dataset,
     "mnist": create_mnist_dataset,
